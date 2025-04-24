@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+import argparse
+import sqlite3
+import datetime
+import os
+import sys
+
+DB_PATH = os.path.expanduser("~/.timesheet.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    # Create projects table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS projects (
+            charge_number TEXT PRIMARY KEY,
+            hourly_rate REAL
+        )
+    ''')
+    # Create sessions table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            charge_number TEXT,
+            punch_in TIMESTAMP,
+            punch_out TIMESTAMP,
+            hourly_rate REAL,
+            FOREIGN KEY(charge_number) REFERENCES projects(charge_number)
+        )
+    ''')
+    # Create breaks table
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS breaks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER,
+            break_start TIMESTAMP,
+            break_end TIMESTAMP,
+            FOREIGN KEY(session_id) REFERENCES sessions(id)
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def get_connection():
+    return sqlite3.connect(DB_PATH)
+
+def punch_in(args):
+    now = datetime.datetime.now()
+    conn = get_connection()
+    c = conn.cursor()
+
+    # Fetch hourly rate if exists, else set to 0
+    c.execute("SELECT hourly_rate FROM projects WHERE charge_number=?", (args.charge_number,))
+    row = c.fetchone()
+    hourly_rate = row[0] if row else 0.0
+
+    # Insert a new session
+    c.execute('''
+        INSERT INTO sessions (charge_number, punch_in, hourly_rate)
+        VALUES (?, ?, ?)
+    ''', (args.charge_number, now, hourly_rate))
+    conn.commit()
+    conn.close()
+    print(f"Punched in at {now} for project {args.charge_number}.")
+
+def punch_out(args):
+    now = datetime.datetime.now()
+    conn = get_connection()
+    c = conn.cursor()
+    # Find the most recent session for the project that has no punch_out time
+    c.execute('''
+        SELECT id, punch_in FROM sessions 
+        WHERE charge_number=? AND punch_out IS NULL 
+        ORDER BY punch_in DESC LIMIT 1
+    ''', (args.charge_number,))
+    row = c.fetchone()
+    if not row:
+        print("No active session found for project", args.charge_number)
+        conn.close()
+        sys.exit(1)
+    session_id = row[0]
+    c.execute('''
+        UPDATE sessions
+        SET punch_out=?
+        WHERE id=?
+    ''', (now, session_id))
+    conn.commit()
+    conn.close()
+    print(f"Punched out at {now} for project {args.charge_number}.")
+
+def break_start(args):
+    now = datetime.datetime.now()
+    conn = get_connection()
+    c = conn.cursor()
+    # Find the most recent active session (with no punch_out)
+    c.execute('''
+        SELECT id FROM sessions 
+        WHERE charge_number=? AND punch_out IS NULL 
+        ORDER BY punch_in DESC LIMIT 1
+    ''', (args.charge_number,))
+    row = c.fetchone()
+    if not row:
+        print("No active session to start a break for project", args.charge_number)
+        conn.close()
+        sys.exit(1)
+    session_id = row[0]
+    # Insert a new break record with break_start
+    c.execute('''
+        INSERT INTO breaks (session_id, break_start)
+        VALUES (?, ?)
+    ''', (session_id, now))
+    conn.commit()
+    conn.close()
+    print(f"Break started at {now} for project {args.charge_number}.")
+
+def break_stop(args):
+    now = datetime.datetime.now()
+    conn = get_connection()
+    c = conn.cursor()
+    # Find the most recent break record without a break_end
+    c.execute('''
+        SELECT b.id 
+        FROM breaks b 
+        JOIN sessions s ON b.session_id = s.id 
+        WHERE s.charge_number=? AND b.break_end IS NULL 
+        ORDER BY b.break_start DESC LIMIT 1
+    ''', (args.charge_number,))
+    row = c.fetchone()
+    if not row:
+        print("No active break found for project", args.charge_number)
+        conn.close()
+        sys.exit(1)
+    break_id = row[0]
+    c.execute('''
+        UPDATE breaks
+        SET break_end=?
+        WHERE id=?
+    ''', (now, break_id))
+    conn.commit()
+    conn.close()
+    print(f"Break ended at {now} for project {args.charge_number}.")
+
+def set_rate(args):
+    conn = get_connection()
+    c = conn.cursor()
+    # Insert or update the project hourly rate
+    c.execute('''
+        INSERT INTO projects (charge_number, hourly_rate)
+        VALUES (?, ?)
+        ON CONFLICT(charge_number) DO UPDATE SET hourly_rate=excluded.hourly_rate
+    ''', (args.charge_number, args.hourly_rate))
+    conn.commit()
+    conn.close()
+    print(f"Set hourly rate for project {args.charge_number} to {args.hourly_rate}.")
+
+def report(args):
+    conn = get_connection()
+    c = conn.cursor()
+    # Fetch all sessions (for simplicity, you might filter by date range in a more complete version)
+    c.execute('''
+        SELECT s.id, s.charge_number, s.punch_in, s.punch_out, s.hourly_rate 
+        FROM sessions s 
+        ORDER BY s.punch_in
+    ''')
+    sessions = c.fetchall()
+    print("Time Tracking Report:")
+    total_earnings = {}
+    for session in sessions:
+        session_id, charge_number, punch_in, punch_out, hourly_rate = session
+        if punch_out is None:
+            print(f"Session {session_id} for project {charge_number} is still open.")
+            continue
+        start = datetime.datetime.fromisoformat(punch_in)
+        end = datetime.datetime.fromisoformat(punch_out)
+        session_duration = (end - start).total_seconds()
+        # Sum up break durations for this session
+        c.execute('''
+            SELECT break_start, break_end FROM breaks 
+            WHERE session_id=? AND break_end IS NOT NULL
+        ''', (session_id,))
+        breaks = c.fetchall()
+        total_break = 0
+        for b in breaks:
+            bs, be = b
+            bs_time = datetime.datetime.fromisoformat(bs)
+            be_time = datetime.datetime.fromisoformat(be)
+            total_break += (be_time - bs_time).total_seconds()
+        net_seconds = session_duration - total_break
+        net_hours = net_seconds / 3600
+        earnings = net_hours * hourly_rate
+        total_earnings[charge_number] = total_earnings.get(charge_number, 0) + earnings
+        print(f"Project: {charge_number}, Session: {session_id}")
+        print(f"  Punch In: {punch_in}")
+        print(f"  Punch Out: {punch_out}")
+        print(f"  Gross Hours: {session_duration/3600:.2f}, Break Hours: {total_break/3600:.2f}, Net Hours: {net_hours:.2f}")
+        print(f"  Hourly Rate: ${hourly_rate:.2f}, Earnings: ${earnings:.2f}\n")
+    print("Total Earnings by Project:")
+    for proj, earning in total_earnings.items():
+        print(f"  {proj}: ${earning:.2f}")
+    conn.close()
+
+def main():
+    init_db()
+    parser = argparse.ArgumentParser(description="Employee Hours Tracking CLI Tool")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # punchin command
+    parser_punchin = subparsers.add_parser("punchin", help="Punch in for a project")
+    parser_punchin.add_argument("charge_number", help="Project charge number")
+    parser_punchin.set_defaults(func=punch_in)
+
+    # punchout command
+    parser_punchout = subparsers.add_parser("punchout", help="Punch out for a project")
+    parser_punchout.add_argument("charge_number", help="Project charge number")
+    parser_punchout.set_defaults(func=punch_out)
+
+    # breakstart command
+    parser_breakstart = subparsers.add_parser("breakstart", help="Start a break for a project")
+    parser_breakstart.add_argument("charge_number", help="Project charge number")
+    parser_breakstart.set_defaults(func=break_start)
+
+    # breakstop command
+    parser_breakstop = subparsers.add_parser("breakstop", help="Stop a break for a project")
+    parser_breakstop.add_argument("charge_number", help="Project charge number")
+    parser_breakstop.set_defaults(func=break_stop)
+
+    # setrate command
+    parser_setrate = subparsers.add_parser("setrate", help="Set the hourly rate for a project")
+    parser_setrate.add_argument("charge_number", help="Project charge number")
+    parser_setrate.add_argument("hourly_rate", type=float, help="Hourly rate")
+    parser_setrate.set_defaults(func=set_rate)
+
+    # report command
+    parser_report = subparsers.add_parser("report", help="Report hours worked")
+    parser_report.set_defaults(func=report)
+
+    args = parser.parse_args()
+    args.func(args)
+
+if __name__ == "__main__":
+    main()
