@@ -5,7 +5,7 @@ import datetime
 import os
 import sys
 
-DB_PATH = os.path.expanduser("~/.timesheet.db")
+DB_PATH = os.environ.get('SMARTTRACK_DB', 'timesheet.db')
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -69,8 +69,8 @@ def punch_out(args):
     c = conn.cursor()
     # Find the most recent session for the project that has no punch_out time
     c.execute('''
-        SELECT id, punch_in FROM sessions 
-        WHERE charge_number=? AND punch_out IS NULL 
+        SELECT id, punch_in FROM sessions
+        WHERE charge_number=? AND punch_out IS NULL
         ORDER BY punch_in DESC LIMIT 1
     ''', (args.charge_number,))
     row = c.fetchone()
@@ -94,8 +94,8 @@ def break_start(args):
     c = conn.cursor()
     # Find the most recent active session (with no punch_out)
     c.execute('''
-        SELECT id FROM sessions 
-        WHERE charge_number=? AND punch_out IS NULL 
+        SELECT id FROM sessions
+        WHERE charge_number=? AND punch_out IS NULL
         ORDER BY punch_in DESC LIMIT 1
     ''', (args.charge_number,))
     row = c.fetchone()
@@ -119,10 +119,10 @@ def break_stop(args):
     c = conn.cursor()
     # Find the most recent break record without a break_end
     c.execute('''
-        SELECT b.id 
-        FROM breaks b 
-        JOIN sessions s ON b.session_id = s.id 
-        WHERE s.charge_number=? AND b.break_end IS NULL 
+        SELECT b.id
+        FROM breaks b
+        JOIN sessions s ON b.session_id = s.id
+        WHERE s.charge_number=? AND b.break_end IS NULL
         ORDER BY b.break_start DESC LIMIT 1
     ''', (args.charge_number,))
     row = c.fetchone()
@@ -158,8 +158,8 @@ def report(args):
     c = conn.cursor()
     # Fetch all sessions (for simplicity, you might filter by date range in a more complete version)
     c.execute('''
-        SELECT s.id, s.charge_number, s.punch_in, s.punch_out, s.hourly_rate 
-        FROM sessions s 
+        SELECT s.id, s.charge_number, s.punch_in, s.punch_out, s.hourly_rate
+        FROM sessions s
         ORDER BY s.punch_in
     ''')
     sessions = c.fetchall()
@@ -175,7 +175,7 @@ def report(args):
         session_duration = (end - start).total_seconds()
         # Sum up break durations for this session
         c.execute('''
-            SELECT break_start, break_end FROM breaks 
+            SELECT break_start, break_end FROM breaks
             WHERE session_id=? AND break_end IS NOT NULL
         ''', (session_id,))
         breaks = c.fetchall()
@@ -238,4 +238,5 @@ def main():
     args.func(args)
 
 if __name__ == "__main__":
+    print(DB_PATH)
     main()
