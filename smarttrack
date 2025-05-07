@@ -5,7 +5,7 @@ import datetime
 import os
 import sys
 
-DB_PATH = os.path.expanduser("~/.timesheet.db")
+DB_PATH = os.environ.get('SMARTTRACK_DB', '~/.timesheet.db')
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
