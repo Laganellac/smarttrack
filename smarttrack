@@ -199,6 +199,73 @@ def report(args):
         print(f"  {proj}: ${earning:.2f}")
     conn.close()
 
+def _export_impl(out):
+    def break_timestr(t):
+        return t.strftime("%I:%M %p")
+    def timeadj_str(total_break):
+        return "" if total_break == 0 else f"-{(float(total_break) / 3600.0):.2f}"
+    def timestr(t):
+        return t.strftime("%m/%d/%y %I:%M %p")
+    out.write("\"Job\",\"Clocked In\",\"Clocked Out\",\"Duration\",\"Hourly Rate\",\"Earnings\",\"Comment\",\"Breaks\",\"Adjustments\",\"TotalTimeAdjustment\",\"TotalEarningsAdjustment\",\"TotalMileage\"\n")
+    conn = get_connection()
+    c = conn.cursor()
+    # Fetch all sessions (for simplicity, you might filter by date range in a more complete version)
+    c.execute('''
+        SELECT s.id, s.charge_number, s.punch_in, s.punch_out, s.hourly_rate
+        FROM sessions s
+        ORDER BY s.punch_in
+    ''')
+    sessions = c.fetchall()
+    total_earnings = {}
+    total_hours = {}
+    for session in sessions:
+        session_id, charge_number, punch_in, punch_out, hourly_rate = session
+        if punch_out is None:
+            print(f"Session {session_id} for project {charge_number} is still open.")
+            continue
+        start = datetime.datetime.fromisoformat(punch_in)
+        end = datetime.datetime.fromisoformat(punch_out)
+        session_duration = (end - start).total_seconds()
+        # Sum up break durations for this session
+        c.execute('''
+            SELECT break_start, break_end FROM breaks
+            WHERE session_id=? AND break_end IS NOT NULL
+        ''', (session_id,))
+        breaks = c.fetchall()
+        break_strs = []
+        total_break = 0
+        for b in breaks:
+            bs, be = b
+            bs_time = datetime.datetime.fromisoformat(bs)
+            be_time = datetime.datetime.fromisoformat(be)
+            b_time = (be_time - bs_time).total_seconds()
+            total_break += b_time
+            b_time_hours = float(b_time) / 3600.0
+            break_strs.append(f"{b_time_hours:.2f}h ({break_timestr(bs_time)} to {break_timestr(be_time)})")
+        net_seconds = session_duration - total_break
+        net_hours = float(net_seconds) / 3600.0
+        earnings = net_hours * hourly_rate
+        total_earnings[charge_number] = total_earnings.get(charge_number, 0) + earnings
+        total_hours[charge_number] = total_hours.get(charge_number, 0.0) + net_hours
+        out.write(f"\"{charge_number}\",\"{timestr(start)}\",\"{timestr(end)}\",\"{net_hours:.2f}\",\"{hourly_rate:.2f}\",\"{earnings:.2f}\",\"\",\"{';'.join(break_strs)}\",\"\",\"{timeadj_str(total_break)}\",\"\",\"\"\n")
+
+    print("Total Earnings by Project:")
+    for proj, earning in total_earnings.items():
+        print(f"  {proj}: ${earning:.2f} ({total_hours[proj]:.2f} hours)")
+    conn.close()
+
+
+def export(args):
+    filename = args.filename
+    if not isinstance(filename, str):
+        raise TypeError(f"export() filename must be a str, got {type(filename)}")
+    if filename == "" or filename == "-":
+        _export_impl(sys.stdout)
+    else:
+        with open(filename, "w") as fout:
+            _export_impl(fout)
+
+
 def main():
     init_db()
     parser = argparse.ArgumentParser(description="Employee Hours Tracking CLI Tool")
@@ -234,8 +301,14 @@ def main():
     parser_report = subparsers.add_parser("report", help="Report hours worked")
     parser_report.set_defaults(func=report)
 
+    # export command
+    parser_export = subparsers.add_parser("export", help="Export hours worked to CSV")
+    parser_export.add_argument("filename", help="The file to export the CSV to", nargs="?", default="", type=str)
+    parser_export.set_defaults(func=export)
+
     args = parser.parse_args()
     args.func(args)
 
 if __name__ == "__main__":
     main()
+
